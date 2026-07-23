@@ -26,9 +26,11 @@ neovate-desktop currently only has a CI workflow with `check` (format+lint+types
 
 ## Changes
 
-### 1. New workflow: `.github/workflows/publish.yml`
+### 1. Release workflows
 
-Triggered on tag push `v*`. Builds production macOS packages for arm64 + x64, publishes to GitHub Releases as a **draft** (allows reviewing release notes before making public).
+`publish.yml` is the main tag-release workflow. It builds production macOS packages for arm64 + x64 first, then runs a native Windows packaging job on `windows-latest` and uploads the Windows installer into the same draft GitHub Release.
+
+`publish-windows.yml` remains as a manual fallback workflow (`workflow_dispatch`) for Windows-only rebuilds and recovery runs.
 
 Draft behavior is handled by `releaseType: "draft"` in the electron-builder config, so the release is created as a draft from the very first upload — no race condition where users see a half-uploaded public release. `electron-updater` correctly ignores drafts, so auto-update only triggers after you manually publish.
 
@@ -139,9 +141,10 @@ Points bumpp at the correct `package.json` in the monorepo (root is private with
 3. `bumpp` updates `packages/desktop/package.json` version, commits, creates `v*` tag, pushes
 4. Tag push triggers `publish.yml`
 5. Preflight job verifies the tag is on master
-6. GitHub Actions builds arm64 + x64, signs, notarizes, uploads to GitHub Releases
-7. Draft release is created — developer reviews and publishes manually
-8. `electron-updater` in the app picks up the published release automatically
+6. GitHub Actions builds macOS arm64 + x64, signs, notarizes, and creates/updates a draft release
+7. GitHub Actions builds the Windows installer natively on `windows-latest` and uploads the `.exe` into the same draft release
+8. Developer reviews and publishes the draft release manually
+9. `electron-updater` in the app picks up the published release automatically
 
 ## Required GitHub Secrets
 
@@ -150,6 +153,7 @@ Points bumpp at the correct `package.json` in the monorepo (root is private with
 - `APPLE_ID` - Apple ID for notarization
 - `APPLE_APP_SPECIFIC_PASSWORD` - App-specific password for notarization
 - `APPLE_TEAM_ID` - Apple Developer Team ID
+- `ORCHIDEA_PROTOCOL_REPO` - Repository variable pointing to the sibling protocol repo used by `file:../../../orchidea-protocol`
 
 `GITHUB_TOKEN` is provided automatically by GitHub Actions.
 
@@ -175,4 +179,6 @@ publish: [
 - The electron-builder config already has the correct `publish` config pointing to `github/neovateai/neovate-desktop`
 - The `beforePack` hook in the config downloads bun for the target arch, which needs network access during CI builds
 - Dev builds use `BUILD_ENV=dev` which changes app ID, name, icon, and compression level
-- All CI build steps use `working-directory: packages/desktop` and invoke `electron-builder` directly, avoiding arg-forwarding issues with `bun run --filter`
+- All CI build steps use `working-directory: packages/desktop` and invoke standardized package scripts or `electron-builder` directly, avoiding arg-forwarding issues with `bun run --filter`
+- Native Windows packaging is intentionally performed on `windows-latest`; the local macOS cross-build path is not a supported release path because NSIS installer generation is not reliable there for the current offline runtime payload
+- `bun run build:win` is the default Windows installer entrypoint. It now hard-fails on non-Windows hosts and cleans any stale partial `.exe` outputs so the default path always means "generate a real installer on native Windows"

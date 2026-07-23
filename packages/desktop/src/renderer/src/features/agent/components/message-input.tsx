@@ -1,28 +1,33 @@
 import Placeholder from "@tiptap/extension-placeholder";
 import { Plugin, PluginKey } from "@tiptap/pm/state";
-import { Extension, useEditor, EditorContent, type JSONContent } from "@tiptap/react";
+import { Extension, useEditor, EditorContent } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import debug from "debug";
 import { AnimatePresence, motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { ImageAttachment, PermissionMode } from "../../../../../shared/features/agent/types";
+import type { FileAttachment, PermissionMode } from "../../../../../shared/features/agent/types";
 
 import { toastManager } from "../../../components/ui/toast";
+import { useRendererApp } from "../../../core/app";
+import { APP_EVENTS, addAppEventListener } from "../../../core/app-events";
 import { useEventCallback } from "../../../hooks/use-event-callback";
 import { useLatestRef } from "../../../hooks/use-latest-ref";
 import { cn } from "../../../lib/utils";
+import { client } from "../../../orpc";
 import { useConfigStore } from "../../config/store";
 import { useSettingsStore } from "../../settings";
 import { claudeCodeChatManager } from "../chat-manager";
 import { useNewSession } from "../hooks/use-new-session";
-import { useSessionMeta } from "../hooks/use-session-meta";
 import { useAgentStore } from "../store";
 import { extractText } from "../utils/extract-text";
 import { buildInsertChatContent, type InsertChatDetail } from "../utils/insert-chat";
+import { tryHandleLocalControlCommand } from "../utils/local-control-commands";
+import { tryHandleLocalTemplateCommand } from "../utils/local-template-commands";
 import { readFileAsAttachment } from "../utils/read-file-as-attachment";
 import { AttachmentPreview } from "./attachment-preview";
+import { ChatVoicePanel } from "./chat-voice-panel";
 import { GradientBorderWrapper } from "./gradient-border-wrapper";
 import { createImagePasteExtension } from "./image-paste-extension";
 import { InputToolbar } from "./input-toolbar";
@@ -30,10 +35,56 @@ import { createMentionExtension } from "./mention-extension";
 import { QueryStatus } from "./query-status";
 import { createSlashCommandsExtension } from "./slash-commands-extension";
 
-const log = debug("neovate:message-input");
+const log = debug("orchidea:message-input");
+
+// #region debug-point voice-asr-modes-renderer
+const ENV = (globalThis as any).process?.env as Record<string, string> | undefined;
+const API_DEBUG = (globalThis as any).api?.debug as
+  | { serverUrl?: string; sessionId?: string; runId?: string }
+  | undefined;
+const DEBUG_SERVER_URL = (
+  import.meta.env.VITE_DEBUG_SERVER_URL ||
+  API_DEBUG?.serverUrl ||
+  ENV?.DEBUG_SERVER_URL ||
+  ""
+).trim();
+const DEBUG_SESSION_ID = (
+  import.meta.env.VITE_DEBUG_SESSION_ID ||
+  API_DEBUG?.sessionId ||
+  ENV?.DEBUG_SESSION_ID ||
+  ""
+).trim();
+const DEBUG_RUN_ID =
+  (
+    import.meta.env.VITE_ORCHIDEA_DEBUG_RUN_ID ||
+    API_DEBUG?.runId ||
+    ENV?.ORCHIDEA_DEBUG_RUN_ID ||
+    "pre"
+  ).trim() || "pre";
+async function reportVoiceModeDebugEvent(
+  event: string,
+  data?: Record<string, unknown>,
+): Promise<void> {
+  if (!DEBUG_SERVER_URL || !DEBUG_SESSION_ID) return;
+  try {
+    await fetch(DEBUG_SERVER_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ts: Date.now(),
+        sessionId: DEBUG_SESSION_ID,
+        runId: DEBUG_RUN_ID,
+        hypothesisId: "A",
+        event,
+        data: data ?? {},
+      }),
+    });
+  } catch {}
+}
+// #endregion debug-point voice-asr-modes-renderer
 
 type Props = {
-  onSend: (message: string, attachments?: ImageAttachment[]) => void;
+  onSend: (message: string, attachments?: FileAttachment[]) => void;
   onCancel: () => void;
   streaming: boolean;
   disabled?: boolean;
@@ -42,18 +93,15 @@ type Props = {
   onRetry?: () => void;
   cwd: string;
   dockAttached?: boolean;
-  /** Show project selector in toolbar (popup window mode) */
-  showProjectSelector?: boolean;
 };
 
 const NEW_CHAT_EASTER_EGGS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
 
-type SessionDraft = {
-  content: JSONContent;
-  attachments: ImageAttachment[];
+type OpenClawReplyContext = {
+  channelId: "wecom" | "dingtalk" | "feishu";
+  target: Record<string, unknown> | null;
+  traceId: string | null;
 };
-
-const sessionDrafts = new Map<string, SessionDraft>();
 
 export function MessageInput({
   onSend,
@@ -65,12 +113,11 @@ export function MessageInput({
   onRetry,
   cwd,
   dockAttached = false,
-  showProjectSelector = false,
 }: Props) {
   const { t } = useTranslation();
   const cwdRef = useLatestRef(cwd);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const editorJsonRef = useRef<JSONContent | null>(null);
+  const app = useRendererApp();
   const { createNewSession } = useNewSession();
 
   const activeSessionId = useAgentStore((s) => s.activeSessionId);
@@ -99,8 +146,10 @@ export function MessageInput({
     claudeCodeChatManager.getChat(activeSessionId)?.store.setState({ promptSuggestion: null });
   });
 
-  const meta = useSessionMeta(activeSessionId);
-  const permissionMode = meta?.permissionMode ?? "default";
+  const permissionMode = useAgentStore(
+    (s) =>
+      (activeSessionId ? s.sessions.get(activeSessionId)?.permissionMode : undefined) ?? "default",
+  );
   const setPermissionMode = useAgentStore((s) => s.setPermissionMode);
 
   const togglePlanMode = useEventCallback(() => {
@@ -117,14 +166,51 @@ export function MessageInput({
     });
   });
 
-  const [attachments, setAttachments] = useState<ImageAttachment[]>(() =>
-    activeSessionId ? (sessionDrafts.get(activeSessionId)?.attachments ?? []) : [],
-  );
+  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const attachmentsRef = useLatestRef(attachments);
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voiceDraftText, setVoiceDraftText] = useState("");
+  const voiceDraftTextRef = useLatestRef(voiceDraftText);
 
-  const addAttachments = useCallback((images: ImageAttachment[]) => {
+  const [openclawReplyContext, setOpenclawReplyContext] = useState<OpenClawReplyContext | null>(
+    null,
+  );
+  const openclawReplyContextRef = useLatestRef(openclawReplyContext);
+
+  useEffect(() => {
+    const cleanup = addAppEventListener(APP_EVENTS.openclawReplyContextSet, (e: Event) => {
+      const detail = (e as CustomEvent<any>)?.detail ?? {};
+      const ctx = detail?.context;
+      if (!ctx) {
+        setOpenclawReplyContext(null);
+        return;
+      }
+      const channelId = String(ctx.channelId ?? "").trim();
+      if (channelId !== "wecom" && channelId !== "dingtalk" && channelId !== "feishu") return;
+      const target =
+        ctx.target && typeof ctx.target === "object" && !Array.isArray(ctx.target)
+          ? (ctx.target as any)
+          : null;
+      const traceId =
+        typeof ctx.traceId === "string" && ctx.traceId.trim() ? ctx.traceId.trim() : null;
+      setOpenclawReplyContext({ channelId, target, traceId });
+    });
+    return () => cleanup();
+  }, []);
+
+  // #region debug-point voice-dualchat-route-switch-message-input-state
+  useEffect(() => {
+    void reportVoiceModeDebugEvent("chat:messageInput:voiceState", {
+      activeSessionId,
+      voiceOpen,
+      draftLength: voiceDraftText.length,
+    });
+  }, [activeSessionId, voiceDraftText.length, voiceOpen]);
+  // #endregion debug-point voice-dualchat-route-switch-message-input-state
+
+  const addAttachments = useCallback((images: FileAttachment[]) => {
     log(
-      "addAttachments: adding %d images, ids=%o",
+      "addAttachments: adding %d files, ids=%o",
       images.length,
       images.map((i) => i.id),
     );
@@ -148,8 +234,18 @@ export function MessageInput({
     () =>
       createSlashCommandsExtension(() => {
         const { activeSessionId, sessions } = useAgentStore.getState();
-        if (!activeSessionId) return [];
-        return sessions.get(activeSessionId)?.availableCommands ?? [];
+        const sdkCommands = activeSessionId
+          ? (sessions.get(activeSessionId)?.availableCommands ?? [])
+          : [];
+        const customCommands = (useConfigStore.getState().customSlashCommands ?? [])
+          .filter((c) => c.enabled !== false)
+          .map((c) => ({
+            name: c.name,
+            description: c.description,
+            argumentHint: c.argumentHint,
+            prompt: c.prompt,
+          }));
+        return [...sdkCommands, ...customCommands];
       }),
     [],
   );
@@ -327,13 +423,6 @@ export function MessageInput({
     },
     editable: !disabled,
     autofocus: "end",
-    content: activeSessionId ? sessionDrafts.get(activeSessionId)?.content : undefined,
-    onCreate: ({ editor: e }) => {
-      editorJsonRef.current = e.getJSON();
-    },
-    onUpdate: ({ editor: e }) => {
-      editorJsonRef.current = e.getJSON();
-    },
   });
 
   const send = useEventCallback(() => {
@@ -358,10 +447,106 @@ export function MessageInput({
       );
     }
     if (!text && imgs.length === 0) return;
-    onSend(text, imgs.length > 0 ? imgs : undefined);
-    editor.commands.clearContent();
-    setAttachments([]);
-    if (activeSessionId) sessionDrafts.delete(activeSessionId);
+    void (async () => {
+      const handled =
+        imgs.length === 0
+          ? await tryHandleLocalTemplateCommand(text).then(async (r) =>
+              r.handled ? r : await tryHandleLocalControlCommand(text),
+            )
+          : { handled: false as const };
+      if (handled.handled) {
+        editor.commands.clearContent();
+        setAttachments([]);
+        return;
+      }
+      onSend(text, imgs.length > 0 ? imgs : undefined);
+      editor.commands.clearContent();
+      setAttachments([]);
+    })();
+  });
+
+  const clearOpenclawReplyContext = useEventCallback(() => {
+    setOpenclawReplyContext(null);
+  });
+
+  const appendVoiceDraft = useEventCallback((text: string) => {
+    const normalized = text.trim();
+    if (!normalized) return;
+    setVoiceDraftText((prev) => (prev.trim() ? `${prev.trim()}\n${normalized}` : normalized));
+  });
+
+  const commitVoiceDraftToEditor = useEventCallback(() => {
+    const draft = voiceDraftTextRef.current.trim();
+    if (!editor || !draft) return;
+    editor
+      .chain()
+      .focus()
+      .insertContent(editor.isEmpty ? draft : `\n${draft}`)
+      .run();
+    setVoiceDraftText("");
+  });
+
+  const closeVoiceAndCommit = useEventCallback(() => {
+    void reportVoiceModeDebugEvent("chat:voiceButton:close", {
+      activeSessionId: useAgentStore.getState().activeSessionId,
+      draftLength: voiceDraftTextRef.current.length,
+    });
+    setVoiceOpen(false);
+    commitVoiceDraftToEditor();
+  });
+
+  const sendOpenclawReply = useEventCallback(() => {
+    if (!editor || streaming) return;
+    const ctx = openclawReplyContextRef.current;
+    if (!ctx) return;
+
+    const text = extractText(editor.getJSON()).trim();
+    if (!text) {
+      toastManager.add({ type: "warning", title: t("chat.openclaw.replyEmpty"), timeout: 2000 });
+      return;
+    }
+    if (attachmentsRef.current.length > 0) {
+      toastManager.add({
+        type: "warning",
+        title: t("chat.openclaw.replyAttachmentsUnsupported"),
+        timeout: 2500,
+      });
+      return;
+    }
+
+    void (async () => {
+      try {
+        const res = await client.openclaw.channelSendText({
+          channelId: ctx.channelId,
+          text,
+          target: (ctx.target ?? undefined) as any,
+          traceId: ctx.traceId ?? undefined,
+        });
+        if (!res.ok) {
+          toastManager.add({
+            type: "error",
+            title: t("chat.openclaw.replySendFailed"),
+            description: res.error ?? "",
+            timeout: 4000,
+          } as any);
+          return;
+        }
+        toastManager.add({
+          type: "success",
+          title: t("chat.openclaw.replySent"),
+          timeout: 2000,
+        });
+        editor.commands.clearContent();
+        setOpenclawReplyContext(null);
+      } catch (e) {
+        toastManager.add({
+          type: "error",
+          title: t("chat.openclaw.replySendFailed"),
+          description: e instanceof Error ? e.message : String(e),
+          timeout: 4000,
+        } as any);
+      }
+    })();
   });
 
   // Keep editable in sync with props
@@ -369,50 +554,10 @@ export function MessageInput({
     editor?.setEditable(!disabled);
   }, [editor, disabled]);
 
-  // Save draft on unmount so it persists across session switches
-  useEffect(() => {
-    return () => {
-      if (!activeSessionId) return;
-      const json = editorJsonRef.current;
-      if (!json) return;
-      const imgs = attachmentsRef.current;
-      if (extractText(json).trim() || imgs.length > 0) {
-        sessionDrafts.set(activeSessionId, { content: json, attachments: imgs });
-      } else {
-        sessionDrafts.delete(activeSessionId);
-      }
-    };
-  }, [activeSessionId]);
-
-  // Restore draft when session switches without remount (e.g., between new sessions in welcome panel)
-  const prevSessionIdRef = useRef(activeSessionId);
-  useEffect(() => {
-    if (prevSessionIdRef.current === activeSessionId) return;
-    prevSessionIdRef.current = activeSessionId;
-    if (!editor || editor.isDestroyed) return;
-    const draft = activeSessionId ? sessionDrafts.get(activeSessionId) : undefined;
-    if (draft) {
-      editor.commands.setContent(draft.content);
-      setAttachments(draft.attachments);
-    } else {
-      editor.commands.clearContent();
-      setAttachments([]);
-    }
-  }, [editor, activeSessionId]);
-
   // Force placeholder re-render when suggestion changes
   useEffect(() => {
     if (!editor || editor.isDestroyed) return;
     editor.view.dispatch(editor.state.tr.setMeta("promptSuggestion", promptSuggestion));
-    // Focus input so Tab/Enter work immediately on the suggestion.
-    // Guard with document.hasFocus() because MessageInput is used in both
-    // the main window and popup window (shared activeSessionId) — without
-    // this, both windows would try to steal focus simultaneously.
-    if (promptSuggestion && document.hasFocus()) {
-      requestAnimationFrame(() => {
-        editor.commands.focus("end");
-      });
-    }
   }, [editor, promptSuggestion]);
 
   // Close suggestion popups when settings opens
@@ -429,8 +574,8 @@ export function MessageInput({
     const handler = () => {
       editor.commands.focus("end");
     };
-    window.addEventListener("neovate:focus-input", handler);
-    return () => window.removeEventListener("neovate:focus-input", handler);
+    const cleanup = addAppEventListener(APP_EVENTS.focusInput, handler);
+    return () => cleanup();
   }, [editor]);
 
   // Listen for insert-chat events from file tree and other entry points
@@ -447,8 +592,8 @@ export function MessageInput({
       if (content.length === 0) return;
       editor.chain().focus().insertContent(content).run();
     };
-    window.addEventListener("neovate:insert-chat", handler);
-    return () => window.removeEventListener("neovate:insert-chat", handler);
+    const cleanup = addAppEventListener(APP_EVENTS.insertChat, handler);
+    return () => cleanup();
   }, [editor]);
 
   const handleFileSelect = useCallback(
@@ -456,24 +601,126 @@ export function MessageInput({
       const files = e.target.files;
       log("handleFileSelect: files=%d", files?.length ?? 0);
       if (!files || files.length === 0) return;
-      const imageFiles = Array.from(files).filter((f) => f.type.startsWith("image/"));
-      log("handleFileSelect: imageFiles=%d", imageFiles.length);
-      if (imageFiles.length === 0) return;
-      Promise.all(imageFiles.map(readFileAsAttachment)).then(addAttachments);
+      Promise.all(Array.from(files).map(readFileAsAttachment)).then(addAttachments);
       e.target.value = "";
     },
     [addAttachments],
   );
+
+  const openVoice = useEventCallback((mode: "dualChat" | "meeting") => {
+    const { voice } = useConfigStore.getState();
+    void reportVoiceModeDebugEvent("chat:voiceButton:click", {
+      mode,
+      prevMode: voice.mode,
+      dualAsrWsUrl: voice.dualAsrWsUrl,
+      meetingAsrWsUrl: voice.meetingAsrWsUrl,
+      ttsUrl: voice.ttsUrl,
+      localTtsModelId: voice.localTtsModelId,
+      activeSessionId: useAgentStore.getState().activeSessionId,
+    });
+    const next = {
+      ...voice,
+      mode,
+      ...(mode === "dualChat"
+        ? {
+            captureInput: "system" as const,
+            backendPreference: "cloud" as const,
+            voiceInputSource: "system" as const,
+            asrEngine: "remote" as const,
+          }
+        : {}),
+    };
+    void (async () => {
+      useConfigStore.setState({ voice: next } as any);
+      try {
+        await client.config.set({ key: "voice", value: next } as any);
+        void reportVoiceModeDebugEvent("chat:voiceButton:configSet:ok", {
+          mode,
+        });
+      } catch (e) {
+        void reportVoiceModeDebugEvent("chat:voiceButton:configSet:error", {
+          mode,
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+      if (mode === "dualChat") {
+        void reportVoiceModeDebugEvent("chat:voiceButton:open-panel", {
+          activeSessionId: useAgentStore.getState().activeSessionId,
+          mode,
+        });
+        setVoiceOpen(true);
+        return;
+      }
+      app.workbench.contentPanel.openView("orchidea-voice");
+    })();
+  });
+
+  const toggleChatVoice = useEventCallback(() => {
+    void reportVoiceModeDebugEvent("chat:voiceButton:toggle", {
+      voiceOpen,
+      activeSessionId: useAgentStore.getState().activeSessionId,
+    });
+    if (voiceOpen) {
+      closeVoiceAndCommit();
+      return;
+    }
+    void (async () => {
+      if (!useAgentStore.getState().activeSessionId) {
+        void reportVoiceModeDebugEvent("chat:voiceButton:create-session:begin", {
+          cwd: cwdRef.current,
+        });
+        await createNewSession(cwdRef.current);
+        void reportVoiceModeDebugEvent("chat:voiceButton:create-session:done", {
+          activeSessionId: useAgentStore.getState().activeSessionId,
+        });
+      }
+      setVoiceDraftText("");
+      await openVoice("dualChat");
+    })();
+  });
+
+  const triggerSystemVoiceInput = useEventCallback(() => {
+    void reportVoiceModeDebugEvent("chat:voiceButton:system-trigger:begin", {
+      activeSessionId: useAgentStore.getState().activeSessionId,
+      voiceOpen,
+    });
+    if (voiceOpen) {
+      closeVoiceAndCommit();
+    }
+    editor.commands.focus("end");
+    void (async () => {
+      try {
+        const result = await client.orchideaVoice.triggerSystemVoiceInput();
+        void reportVoiceModeDebugEvent("chat:voiceButton:system-trigger:done", result);
+        if (!result.ok) {
+          toastManager.add({
+            type: "warning",
+            title: "无法直接启动系统语音输入",
+            description: result.message || "请手动使用操作系统自带的语音输入快捷键。",
+            timeout: 4000,
+          });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        void reportVoiceModeDebugEvent("chat:voiceButton:system-trigger:error", { message });
+        toastManager.add({
+          type: "error",
+          title: "系统语音输入启动失败",
+          description: "请手动使用操作系统自带的语音输入快捷键。",
+          timeout: 4000,
+        });
+      }
+    })();
+  });
   return (
     <div className={cn("px-4 pt-4 pb-1 max-w-3xl mx-auto w-full", dockAttached ? "pb-1 pt-0" : "")}>
       {activeSessionId && <QueryStatus sessionId={activeSessionId} />}
       <input
         ref={fileInputRef}
         type="file"
-        accept="image/*"
         multiple
         className="hidden"
-        aria-label={t("chat.attachImages")}
+        aria-label={t("chat.attachFiles")}
         onChange={handleFileSelect}
       />
       <GradientBorderWrapper
@@ -503,10 +750,19 @@ export function MessageInput({
             </motion.div>
           )}
         </AnimatePresence>
-        <AttachmentPreview attachments={attachments} onRemove={removeAttachment} />
         <div data-has-suggestion={promptSuggestion ? "" : undefined}>
           <EditorContent editor={editor} />
         </div>
+        <AttachmentPreview attachments={attachments} onRemove={removeAttachment} />
+        {voiceOpen ? (
+          <ChatVoicePanel
+            compact
+            sessionId={activeSessionId}
+            transcriptMode="draft"
+            onFinalTranscript={appendVoiceDraft}
+            onClose={closeVoiceAndCommit}
+          />
+        ) : null}
         <InputToolbar
           streaming={streaming}
           disabled={disabled}
@@ -514,10 +770,15 @@ export function MessageInput({
           sessionInitError={sessionInitError}
           onRetry={onRetry}
           onSend={send}
+          openclawReplyContext={openclawReplyContext}
+          onSendOpenclawReply={sendOpenclawReply}
+          onClearOpenclawReplyContext={clearOpenclawReplyContext}
           onCancel={onCancel}
           onAttach={() => fileInputRef.current?.click()}
+          onVoice={triggerSystemVoiceInput}
+          onMeeting={() => openVoice("meeting")}
           activeSessionId={activeSessionId}
-          showProjectSelector={showProjectSelector}
+          voiceActive={voiceOpen}
         />
       </GradientBorderWrapper>
     </div>

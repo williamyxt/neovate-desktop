@@ -2,7 +2,7 @@ import debug from "debug";
 import { create } from "zustand";
 import { immer } from "zustand/middleware/immer";
 
-const log = debug("neovate:config");
+const log = debug("orchidea:config");
 
 import type { AppConfig } from "../../../../shared/features/config/types";
 
@@ -25,15 +25,15 @@ const DEFAULT_CONFIG: AppConfig = {
   // General Settings
   theme: "system",
   themeStyle: "default",
-  locale: "system",
+  locale: "zh-CN",
+  uiMode: "simple",
+  forceModelLanguage: true,
   runOnStartup: false,
   multiProjectSupport: false,
   appFontSize: 14,
   terminalFontSize: 12,
   terminalFont: "",
   developerMode: false,
-  showSessionInitStatus: false,
-  claudeCodeBinPath: "",
 
   // Sidebar Settings (multi-project mode)
   sidebarOrganize: "byProject",
@@ -41,26 +41,154 @@ const DEFAULT_CONFIG: AppConfig = {
 
   // Chat Settings
   sendMessageWith: "enter",
-  agentLanguage: "English",
+  agentLanguage: "Chinese",
+  agentPersonality: "default" as const,
   permissionMode: "default",
   notificationSound: "default",
   tokenOptimization: true,
   networkInspector: false,
-  keepAwake: false,
+  keepAwake: true,
   preWarmSessions: true,
-  auxiliaryModelSelection: "",
+  postToolUseHooks: [],
+  customSlashCommands: [],
 
   // Keybindings
   keybindings: {},
 
-  // Popup Window
-  popupWindowEnabled: true,
-  popupWindowShortcut: "Alt+N",
-  popupWindowStayOpen: true,
+  // Chat view mode
+  viewMode: "verbose" as const,
 
   // Skills
-  skillsRegistries: [],
-  npmRegistry: "",
+  skillsRegistryUrls: [],
+
+  // HTML
+  htmlTemplatesRegistryUrls: [],
+  htmlTemplatesMarketZipUrl: "https://example.com/market.zip",
+  htmlVercelToken: "",
+  htmlVercelTeamSlug: "",
+  htmlVercelTeamId: "",
+  contentPanelNewTabViewTypes: [],
+
+  // Worktree isolation
+  useWorktrees: false,
+
+  // Layout preset
+  layoutPreset: "default",
+
+  // OpenClaw Watchdog
+  openclawWatchdog: {
+    enabled: true,
+    agentHeartbeatIntervalMs: 5000,
+    agentStallTimeoutMs: 120_000,
+    autoRecover: true,
+    maxRecoverAttempts: 3,
+  },
+
+  voice: {
+    captureInput: "system",
+    backendPreference: "cloud",
+    voiceInputSource: "system",
+    cloudGateway: {
+      enabled: false,
+      baseUrl: "",
+    },
+    aliyunIsi: {
+      enabled: false,
+      region: "cn-shanghai",
+      appKey: "",
+      token: "",
+      asr: {
+        sampleRate: 16000,
+        enableIntermediateResult: true,
+        enablePunctuationPrediction: true,
+        enableInverseTextNormalization: true,
+      },
+      tts: {
+        voice: "xiaoyun",
+        sampleRate: 16000,
+        volume: 50,
+        speechRate: 0,
+        pitchRate: 0,
+        enableSubtitle: false,
+        enablePhonemeTimestamp: false,
+      },
+    },
+    mode: "dualChat",
+    dualAsrWsUrl: "ws://localhost:8000/api/stream",
+    dualAsrParamsJson: JSON.stringify(
+      {
+        sendMode: "binary",
+        startMessage: { client_id: "orchidea", hotwords: "" },
+        resetMessage: { type: "end" },
+        resultTextField: "text",
+        resultFinalField: "type",
+        startPerUtterance: false,
+        closeOnReset: true,
+      },
+      null,
+      2,
+    ),
+    meetingAsrWsUrl: "ws://localhost:10095",
+    meetingAsrParamsJson: JSON.stringify(
+      {
+        sendMode: "binary",
+        startPerUtterance: true,
+        startMessage: {
+          mode: "2pass",
+          chunk_size: [5, 10, 5],
+          chunk_interval: 10,
+          encoder_chunk_look_back: 4,
+          decoder_chunk_look_back: 0,
+          audio_fs: 16000,
+          wav_name: "meeting",
+          wav_format: "pcm",
+          is_speaking: true,
+          hotwords: "",
+          itn: true,
+        },
+        resetMessage: { is_speaking: false },
+        resultTextField: "text",
+        resultFinalField: "is_final",
+        userIdField: "spk_name",
+      },
+      null,
+      2,
+    ),
+    ttsUrl: "",
+    ttsParamsJson: JSON.stringify(
+      {
+        textField: "input",
+        responseFormat: "pcm_s16le",
+        sampleRate: 24000,
+        payload: { model: "tts-1", voice: "af_sky", stream: true, response_format: "pcm" },
+      },
+      null,
+      2,
+    ),
+    localTtsModelId: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    localTtsSpeaker: "Vivian",
+    localTtsLanguage: "Auto",
+    localTtsInstruct: "",
+    localTtsOffline: false,
+    speakerStylesJson: JSON.stringify({}, null, 2),
+    voiceprintEnabled: false,
+    voiceprintParamsJson: JSON.stringify(
+      {
+        diarization: true,
+        spkField: "spk_name",
+        scoreField: "spk_score",
+      },
+      null,
+      2,
+    ),
+    asrEngine: "remote",
+    funasrModel: "iic/SenseVoiceSmall",
+    funasrDevice: "cpu",
+  },
+
+  computerControl: {
+    enabled: false,
+  },
 };
 
 export const useConfigStore = create<ConfigState>()(

@@ -1,4 +1,4 @@
-import { isDev, deeplinkScheme } from "./build-env.mjs";
+const isDev = process.env.BUILD_ENV === "dev";
 
 /**
  * @type {import('electron-builder').Configuration}
@@ -41,70 +41,143 @@ async function beforePack(context) {
       stdio: "inherit",
     });
   }
+
+  if (platform === "darwin") {
+    const helperSource = path.join(
+      projectDir,
+      "resources",
+      "computer-control",
+      "macos-helper.swift",
+    );
+    const helperBinary = path.join(
+      projectDir,
+      "resources",
+      "computer-control",
+      "orchidea-computer-control-helper",
+    );
+    if (existsSync(helperSource)) {
+      console.log("  • compiling macOS computer-control helper...");
+      execSync(
+        `/usr/bin/xcrun swiftc -O "${helperSource}" -framework AppKit -framework ApplicationServices -o "${helperBinary}"`,
+        {
+          cwd: projectDir,
+          stdio: "inherit",
+        },
+      );
+    }
+  }
+}
+
+/** @param {import('electron-builder').AfterPackContext} context */
+async function afterPack(context) {
+  const fs = await import("node:fs/promises");
+  const { existsSync } = await import("node:fs");
+  const path = await import("node:path");
+
+  if (context.packager.platform.name !== "mac") return;
+
+  const usage = "用于语音对话与会议录音/转写。";
+
+  const escapeXml = (s) =>
+    String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+
+  const ensurePlistKey = (xml, key, value) => {
+    if (xml.includes(`<key>${key}</key>`)) return xml;
+    const insert = `  <key>${key}</key>\n  <string>${escapeXml(value)}</string>\n`;
+    const idx = xml.lastIndexOf("</dict>");
+    if (idx < 0) return xml;
+    return `${xml.slice(0, idx)}${insert}${xml.slice(idx)}`;
+  };
+
+  const outDir = context.appOutDir;
+  const entries = await fs.readdir(outDir);
+  const appName = entries.find((e) => e.endsWith(".app"));
+  if (!appName) return;
+  const appPath = path.join(outDir, appName);
+  const frameworksDir = path.join(appPath, "Contents", "Frameworks");
+  if (!existsSync(frameworksDir)) return;
+
+  const frameworks = await fs.readdir(frameworksDir);
+  const helperApps = frameworks.filter((e) => e.endsWith(".app"));
+
+  for (const helper of helperApps) {
+    const plistPath = path.join(frameworksDir, helper, "Contents", "Info.plist");
+    if (!existsSync(plistPath)) continue;
+    const xml = await fs.readFile(plistPath, "utf-8");
+    const next = ensurePlistKey(xml, "NSMicrophoneUsageDescription", usage);
+    if (next !== xml) await fs.writeFile(plistPath, next);
+  }
 }
 
 const config = {
-  appId: isDev ? "com.neovateai.desktop.dev" : "com.neovateai.desktop",
-  productName: isDev ? "Neovate Dev" : "Neovate",
+  appId: isDev ? "com.orchidea.desktop.dev" : "com.orchidea.desktop",
+  productName: isDev ? "Orchidea Desktop Dev" : "Orchidea Desktop",
 
   directories: {
     buildResources: "build",
     output: "release",
   },
 
-  artifactName: isDev ? "neovate-dev-${arch}.${ext}" : "neovate-${version}-${arch}.${ext}",
-
-  publish: [
-    {
-      provider: "github",
-      owner: "neovateai",
-      repo: "neovate-desktop",
-      releaseType: "draft",
-    },
-  ],
+  artifactName: isDev ? "orchidea-desktop-dev-${arch}.${ext}" : "orchidea-desktop-${arch}.${ext}",
 
   asar: true,
   asarUnpack: [
-    "resources/**",
     "**/node_modules/node-pty/**/*",
     "**/node_modules/@anthropic-ai/claude-agent-sdk/**/*",
   ],
 
   beforePack,
+  afterPack,
 
   extraResources: [
     { from: "vendor/bun", to: "bun", filter: ["bun", "bun.exe"] },
     { from: "vendor/rtk", to: "rtk", filter: ["rtk", "rtk.exe"] },
     { from: "resources/fetch-interceptor.js", to: "fetch-interceptor.js" },
+    { from: "resources/html-anything", to: "html-anything" },
+    {
+      from: "resources/orchidea-voice",
+      to: "orchidea-voice",
+      filter: ["**/*", "!models/**"],
+    },
+    { from: "resources/computer-control", to: "computer-control" },
   ],
 
   files: [
-    "dist/**/*",
-    "node_modules/**/*",
-    "!**/.vscode/*",
-    "!src/*",
-    "!electron.vite.config.{js,ts,mjs,cjs}",
-    "!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}",
-    "!{.env,.env.*,.npmrc,pnpm-lock.yaml}",
-    "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}",
+    {
+      from: ".",
+      filter: [
+        "package.json",
+        "dist/**/*",
+        "node_modules/**/*",
+        "!resources/**",
+        "!**/.vscode/*",
+        "!src/*",
+        "!electron.vite.config.{js,ts,mjs,cjs}",
+        "!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}",
+        "!{.env,.env.*,.npmrc,pnpm-lock.yaml}",
+        "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}",
+      ],
+    },
   ],
+
+  protocols: [{ name: "Orchidea Desktop", schemes: [isDev ? "orchidea-dev" : "orchidea"] }],
 
   compression: isDev ? "normal" : "maximum",
 
   mac: {
     icon: isDev ? "build/icons/dev/icon.icns" : "build/icons/prod/icon.icns",
-    protocols: [
-      {
-        name: isDev ? "Neovate Dev" : "Neovate",
-        schemes: [deeplinkScheme],
-      },
-    ],
     category: "public.app-category.developer-tools",
     hardenedRuntime: true,
     entitlements: "build/entitlements.mac.plist",
     entitlementsInherit: "build/entitlements.mac.plist",
     target: ["dmg", "zip"],
     notarize: !!(process.env.APPLE_ID && process.env.APPLE_APP_SPECIFIC_PASSWORD),
+    extendInfo: {
+      NSMicrophoneUsageDescription: "用于语音对话与会议录音/转写。",
+      NSAppleEventsUsageDescription: "用于控制桌面应用、窗口聚焦与键鼠自动化。",
+      NSBluetoothAlwaysUsageDescription: "用于通过蓝牙连接录音笔并采集音频。",
+      NSBluetoothPeripheralUsageDescription: "用于通过蓝牙连接录音笔并采集音频。",
+    },
     files: [
       "!**/node_modules/@anthropic-ai/claude-agent-sdk/vendor/ripgrep/*-linux/**",
       "!**/node_modules/@anthropic-ai/claude-agent-sdk/vendor/ripgrep/*-win32/**",
@@ -115,7 +188,10 @@ const config = {
 
   win: {
     icon: isDev ? "build/icons/dev/icon.png" : "build/icons/prod/icon.png",
-    target: [{ target: "nsis", arch: ["x64"] }],
+    target: [
+      { target: "nsis", arch: ["x64"] },
+      { target: "zip", arch: ["x64"] },
+    ],
     files: [
       "!**/node_modules/@anthropic-ai/claude-agent-sdk/vendor/ripgrep/*-linux/**",
       "!**/node_modules/@anthropic-ai/claude-agent-sdk/vendor/ripgrep/*-darwin/**",

@@ -1,9 +1,7 @@
-name: Release Desktop
+name: Release Windows Native
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,70 +18,21 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify tag is on master
-        run: |
-          if ! git merge-base --is-ancestor ${{ github.sha }} origin/master; then
-            echo "Tag must be on master branch"
-            exit 1
-          fi
-      - name: Verify tag matches package.json version
-        run: |
-          TAG_VERSION="${{ github.ref_name }}"
-          TAG_VERSION="${TAG_VERSION#v}"
-          PKG_VERSION=$(node -p "require('./packages/desktop/package.json').version")
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION)"
-            exit 1
-          fi
-
-  build-mac:
-    needs: preflight
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            arch: arm64
-          - os: macos-15-intel
-            arch: x64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Setup bun
-        uses: oven-sh/setup-bun@v2
-      - name: Cache bun dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-bun-
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-      - name: Build and publish
-        working-directory: packages/desktop
-        run: bun run build && bunx electron-builder --mac --${{ matrix.arch }} --config configs/electron-builder.mjs --publish=always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-
   build-win:
-    needs: [preflight, build-mac]
+    needs: preflight
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Checkout orchidea-protocol
         if: vars.ORCHIDEA_PROTOCOL_REPO != ''
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.ORCHIDEA_PROTOCOL_REPO }}
           path: orchidea-protocol
+
       - name: Link orchidea-protocol sibling path
         if: vars.ORCHIDEA_PROTOCOL_REPO != ''
         shell: pwsh
@@ -96,6 +45,7 @@ jobs:
             Remove-Item $target -Recurse -Force
           }
           New-Item -ItemType Junction -Path $target -Target $source | Out-Null
+
       - name: Verify protocol dependency path
         shell: pwsh
         run: |
@@ -104,8 +54,10 @@ jobs:
             Write-Error "Missing sibling dependency ../orchidea-protocol. Set repository variable ORCHIDEA_PROTOCOL_REPO to enable native Windows packaging."
             exit 1
           }
+
       - name: Setup bun
         uses: oven-sh/setup-bun@v2
+
       - name: Cache bun dependencies
         uses: actions/cache@v4
         with:
@@ -113,6 +65,7 @@ jobs:
           key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
           restore-keys: |
             ${{ runner.os }}-bun-
+
       - name: Cache Electron
         uses: actions/cache@v4
         with:
@@ -120,23 +73,26 @@ jobs:
           key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/desktop/package.json') }}
           restore-keys: |
             electron-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
       - name: Build Windows installer natively
-        working-directory: packages/desktop
         run: bun run build:win
+        working-directory: packages/desktop
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-      - name: Upload Windows artifacts to release
-        uses: softprops/action-gh-release@v2
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
         with:
-          draft: true
-          files: |
+          name: orchidea-desktop-win-x64
+          path: |
             packages/desktop/release/orchidea-desktop-x64.exe
             packages/desktop/release/orchidea-desktop-x64.zip
             packages/desktop/release/latest*.yml
             packages/desktop/release/*.blockmap
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          if-no-files-found: error
+          retention-days: 14
