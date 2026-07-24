@@ -76,7 +76,7 @@ jobs:
             electron-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install
 
       - name: Build Windows installer natively
         run: bun run build:win
