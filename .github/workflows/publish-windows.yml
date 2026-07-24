@@ -46,14 +46,15 @@ jobs:
           }
           New-Item -ItemType Junction -Path $target -Target $source | Out-Null
 
-      - name: Verify protocol dependency path
+      - name: Create orchidea-protocol stub (no repo variable set)
+        if: vars.ORCHIDEA_PROTOCOL_REPO == ''
         shell: pwsh
         run: |
           $target = Join-Path (Split-Path $env:GITHUB_WORKSPACE -Parent) "orchidea-protocol"
-          if (-not (Test-Path $target)) {
-            Write-Error "Missing sibling dependency ../orchidea-protocol. Set repository variable ORCHIDEA_PROTOCOL_REPO to enable native Windows packaging."
-            exit 1
-          }
+          New-Item -ItemType Directory -Path (Join-Path $target "dist") -Force | Out-Null
+          Set-Content -Path (Join-Path $target "package.json") -Value '{"name":"@orchidea/protocol","version":"1.0.0","type":"module","main":"./dist/index.js"}'
+          Set-Content -Path (Join-Path $target "dist/index.js") -Value 'export {};'
+          Write-Host "Created minimal orchidea-protocol stub at $target"
 
       - name: Setup bun
         uses: oven-sh/setup-bun@v2
