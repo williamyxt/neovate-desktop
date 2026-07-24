@@ -75,6 +75,9 @@ jobs:
           restore-keys: |
             electron-${{ runner.os }}-${{ runner.arch }}-
 
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Install dependencies
         run: bun install
 
