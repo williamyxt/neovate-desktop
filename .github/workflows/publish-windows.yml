@@ -82,13 +82,12 @@ jobs:
         shell: pwsh
         run: |
           $scriptsDir = "packages/desktop/scripts"
-          $scripts = @("build-html-anything.ts")
-          foreach ($script in $scripts) {
-            $path = Join-Path $scriptsDir $script
-            if (-not (Test-Path $path)) {
-              Write-Host "Creating stub: $script"
-              Set-Content -Path $path -Value "// auto-generated stub - original script removed upstream`nexport {};"
-            }
+          if (-not (Test-Path (Join-Path $scriptsDir "build-html-anything.ts"))) {
+            Write-Host "Creating stub: build-html-anything.ts"
+            @"
+            // auto-generated stub
+            export {};
+            "@ | Set-Content -Path (Join-Path $scriptsDir "build-html-anything.ts")
           }
 
       - name: Build Windows installer natively
