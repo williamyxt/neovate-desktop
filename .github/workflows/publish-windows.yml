@@ -75,11 +75,10 @@ jobs:
           restore-keys: |
             electron-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-
       - name: Install dependencies
         run: bun install
+        env:
+          npm_config_msvs_version: "2022"
 
       - name: Build Windows installer natively
         run: bun run build:win
